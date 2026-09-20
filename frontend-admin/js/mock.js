@@ -253,9 +253,27 @@
     '科技': ['软件', '硬件', '互联网', '云计算'],
   };
 
+  /**
+   * 规范化集合成员：按现有商家表去重并剔除无效（已删除）商家 ID，保持原顺序
+   * @param {Array<string>} merchantIds 待规范化的成员 ID 列表
+   * @returns {Array<string>} 实际存在的商家 ID 列表（去重）
+   */
+  function normalizeSetMerchantIds(merchantIds) {
+    var validMap = {};
+    store.getMerchants().forEach(function (m) { validMap[m.id] = true; });
+    var seen = {};
+    var result = [];
+    (merchantIds || []).forEach(function (id) {
+      if (validMap[id] && !seen[id]) {
+        seen[id] = true;
+        result.push(id);
+      }
+    });
+    return result;
+  }
+
   // 生成短 ID，格式如 M006、SET005、k_abc123
-  function nextId(prefix, existingList) {
-    // 知识条目使用短时间戳
+  function nextId(prefix, existingList) {    // 知识条目使用短时间戳
     if (prefix === 'k') {
       return 'k_' + Date.now().toString(36);
     }
@@ -316,6 +334,21 @@
       var all = load('merchantKnowledge', {});
       delete all[id];
       save('merchantKnowledge', all);
+      // 联动：从所有商家集合中移除该商家
+      var sets = load('merchantSets', defaultMerchantSets);
+      var setsChanged = false;
+      sets.forEach(function (s) {
+        if (s.merchantIds && s.merchantIds.indexOf(id) !== -1) {
+          s.merchantIds = s.merchantIds.filter(function (mid) { return mid !== id; });
+          setsChanged = true;
+        }
+      });
+      if (setsChanged) save('merchantSets', sets);
+      // 联动：从通用知识黑名单中移除
+      var blacklist = load('blacklistMerchantIds', defaultBlacklistMerchantIds);
+      if (blacklist.indexOf(id) !== -1) {
+        save('blacklistMerchantIds', blacklist.filter(function (mid) { return mid !== id; }));
+      }
       return list;
     },
     getMerchantKnowledge: function (merchantId) {
@@ -384,7 +417,7 @@
     createMerchantSet: function (name, merchantIds) {
       var sets = store.getMerchantSets().slice();
       var id = nextId('SET', sets);
-      sets.push({ id: id, name: name, merchantIds: merchantIds || [] });
+      sets.push({ id: id, name: name, merchantIds: normalizeSetMerchantIds(merchantIds) });
       save('merchantSets', sets);
       var all = load('merchantSetKnowledge', {});
       all[id] = [];
@@ -394,7 +427,11 @@
     updateMerchantSet: function (id, name, merchantIds) {
       var sets = store.getMerchantSets().map(function (s) {
         if (s.id !== id) return s;
-        return { id: s.id, name: name != null ? name : s.name, merchantIds: merchantIds != null ? merchantIds : s.merchantIds };
+        return {
+          id: s.id,
+          name: name != null ? name : s.name,
+          merchantIds: merchantIds != null ? normalizeSetMerchantIds(merchantIds) : s.merchantIds
+        };
       });
       save('merchantSets', sets);
       return sets;
@@ -406,6 +443,88 @@
       delete all[id];
       save('merchantSetKnowledge', all);
       return sets;
+    },
+    /**
+     * 批量调整集合成员：一次提交多条「加入/移除」操作，逐条给出结果
+     * @param {string} setId 集合 ID
+     * @param {Array<{merchantId:string, action:string}>} operations
+     *        action 为 'add'（加入）或 'remove'（移除）
+     * @returns {{success:boolean, set:Object|null, results:Array}}
+     *          results 每项：{merchantId, action, status:'success'|'skipped'|'error', message}
+     */
+    adjustMerchantSetMembers: function (setId, operations) {
+      var sets = store.getMerchantSets();
+      var target = sets.find(function (s) { return s.id === setId; });
+      if (!target) {
+        return {
+          success: false,
+          set: null,
+          results: (operations || []).map(function (op) {
+            return { merchantId: op.merchantId, action: op.action, status: 'error', message: '集合不存在' };
+          })
+        };
+      }
+
+      var merchantMap = {};
+      store.getMerchants().forEach(function (m) { merchantMap[m.id] = m; });
+
+      // 以规范化后的现有成员为基础顺序执行，保留原有排序
+      var currentIds = normalizeSetMerchantIds(target.merchantIds);
+      var results = [];
+      var seenAdd = {};
+
+      (operations || []).forEach(function (op) {
+        var mid = op.merchantId;
+        if (op.action === 'add') {
+          if (!merchantMap[mid]) {
+            results.push({ merchantId: mid, action: 'add', status: 'error', message: '商家不存在，已跳过' });
+          } else if (currentIds.indexOf(mid) !== -1 || seenAdd[mid]) {
+            results.push({ merchantId: mid, action: 'add', status: 'skipped', message: '已是集合成员，无需重复加入' });
+          } else {
+            seenAdd[mid] = true;
+            currentIds.push(mid);
+            results.push({ merchantId: mid, action: 'add', status: 'success', message: '加入成功' });
+          }
+        } else if (op.action === 'remove') {
+          var idx = currentIds.indexOf(mid);
+          if (idx === -1) {
+            results.push({ merchantId: mid, action: 'remove', status: 'skipped', message: '不在集合中，无需移除' });
+          } else {
+            currentIds.splice(idx, 1);
+            results.push({ merchantId: mid, action: 'remove', status: 'success', message: '移除成功' });
+          }
+        } else {
+          results.push({ merchantId: mid, action: op.action, status: 'error', message: '未知操作类型' });
+        }
+      });
+
+      target.merchantIds = currentIds;
+      save('merchantSets', sets);
+
+      return {
+        success: results.some(function (r) { return r.status === 'success'; }),
+        set: target,
+        results: results
+      };
+    },
+    /**
+     * 全部集合的商家数量按实际包含（且仍存在）的商家重新计算
+     * @returns {{changed:boolean, sets:Array, changedIds:Array<string>}}
+     */
+    reconcileMerchantSets: function () {
+      var sets = store.getMerchantSets();
+      var changedIds = [];
+      var nextSets = sets.map(function (s) {
+        var normalized = normalizeSetMerchantIds(s.merchantIds);
+        var sameLength = normalized.length === (s.merchantIds || []).length;
+        var sameContent = sameLength && normalized.every(function (id, i) { return id === s.merchantIds[i]; });
+        if (!sameContent) changedIds.push(s.id);
+        return { id: s.id, name: s.name, merchantIds: normalized };
+      });
+      if (changedIds.length > 0) {
+        save('merchantSets', nextSets);
+      }
+      return { changed: changedIds.length > 0, sets: nextSets, changedIds: changedIds };
     },
     getMerchantSetKnowledge: function (setId) {
       var all = load('merchantSetKnowledge', defaultMerchantSetKnowledge);

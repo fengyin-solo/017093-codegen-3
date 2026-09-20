@@ -53,7 +53,7 @@
                   <tr>
                     <th>集合名称</th>
                     <th>商家数量</th>
-                    <th class="text-right w-40">操作</th>
+                    <th class="text-right w-56">操作</th>
                   </tr>
                 </thead>
                 <tbody id="setTableBody"></tbody>
@@ -98,7 +98,7 @@
     </main>
   </div>
 
-  <!-- 集合编辑弹层 -->
+  <!-- 集合名称编辑弹层 -->
   <div id="setModal" class="modal-overlay" style="display: none;">
     <div class="modal-box premium-card max-w-lg rounded-2xl border border-slate-200">
       <h3 id="setModalTitle" class="modal-title text-slate-900">新建商家集合</h3>
@@ -107,14 +107,87 @@
           <label class="block text-sm font-medium text-slate-700 mb-1">集合名称</label>
           <input type="text" id="setFormName" class="input-common rounded-xl" placeholder="输入集合名称" />
         </div>
-        <div>
+        <div id="setFormMerchantsWrap">
           <label class="block text-sm font-medium text-slate-700 mb-1">选择商家（多选）</label>
           <div id="setFormMerchants" class="border border-slate-200 rounded-xl p-4 max-h-48 overflow-y-auto space-y-2 bg-slate-50"></div>
+          <p class="text-xs text-subtle mt-1.5">集合创建后，可通过列表中的「成员维护」批量增删商家。</p>
         </div>
       </div>
       <div class="flex justify-end gap-3 mt-6">
         <button type="button" id="setModalCancel" class="btn-secondary">取消</button>
         <button type="button" id="setModalSubmit" class="btn-primary inline-flex items-center gap-2"><span class="iconify" data-icon="lucide:check" data-width="16" data-height="16"></span>保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 集合成员维护弹层 -->
+  <div id="memberModal" class="modal-overlay" style="display: none;">
+    <div class="modal-box modal-box-wide premium-card rounded-2xl border border-slate-200">
+      <h3 id="memberModalTitle" class="modal-title text-slate-900">集合成员维护</h3>
+
+      <!-- 视图一：成员选择 -->
+      <div id="memberEditView">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+          <p id="memberMeta" class="text-sm text-subtle"></p>
+          <p class="text-xs text-subtle">勾选当前成员可批量移除，勾选候选商家可批量加入，一次提交。</p>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- 当前成员 -->
+          <div class="border border-slate-200 rounded-xl flex flex-col min-h-0">
+            <div class="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
+              <input type="checkbox" id="memberCheckAll" title="全选/取消全选（当前筛选结果）" />
+              <label for="memberCheckAll" class="!mb-0 text-sm font-medium text-obsidian cursor-pointer">当前成员</label>
+              <span id="memberCount" class="text-xs text-subtle"></span>
+            </div>
+            <div class="px-4 py-2 border-b border-slate-100">
+              <input type="text" id="memberSearch" class="input-common rounded-lg text-sm" placeholder="按名称或 ID 搜索成员" />
+            </div>
+            <div id="memberList" class="p-2 max-h-72 overflow-y-auto space-y-1"></div>
+          </div>
+          <!-- 候选商家 -->
+          <div class="border border-slate-200 rounded-xl flex flex-col min-h-0">
+            <div class="flex items-center gap-2 px-4 py-3 border-b border-slate-100">
+              <input type="checkbox" id="candidateCheckAll" title="全选/取消全选（当前筛选结果）" />
+              <label for="candidateCheckAll" class="!mb-0 text-sm font-medium text-obsidian cursor-pointer">候选商家（未加入）</label>
+              <span id="candidateCount" class="text-xs text-subtle"></span>
+            </div>
+            <div class="px-4 py-2 border-b border-slate-100">
+              <input type="text" id="candidateSearch" class="input-common rounded-lg text-sm" placeholder="按名称或 ID 搜索商家" />
+            </div>
+            <div id="candidateList" class="p-2 max-h-72 overflow-y-auto space-y-1"></div>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-3 mt-5">
+          <div id="memberPending" class="flex flex-wrap items-center gap-2 text-xs"></div>
+          <div class="flex items-center gap-3 ml-auto">
+            <button type="button" id="memberModalCancel" class="btn-secondary">取消</button>
+            <button type="button" id="memberModalSubmit" class="btn-primary inline-flex items-center gap-2"><span class="iconify" data-icon="lucide:check-check" data-width="16" data-height="16"></span>提交调整</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 视图二：逐条结果 -->
+      <div id="memberResultView" class="hidden">
+        <div id="memberResultStats" class="flex flex-wrap items-center gap-2 mb-3 text-xs"></div>
+        <div class="border border-slate-200 rounded-xl overflow-hidden">
+          <div class="table-wrap max-h-80 overflow-y-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr>
+                  <th class="w-28">操作</th>
+                  <th>商家</th>
+                  <th class="w-24">结果</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody id="memberResultBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="flex justify-end gap-3 mt-5">
+          <button type="button" id="memberResultBack" class="btn-secondary">继续调整</button>
+          <button type="button" id="memberResultDone" class="btn-primary inline-flex items-center gap-2"><span class="iconify" data-icon="lucide:check" data-width="16" data-height="16"></span>完成</button>
+        </div>
       </div>
     </div>
   </div>
