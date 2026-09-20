@@ -254,8 +254,7 @@
   };
 
   // 生成短 ID，格式如 M006、SET005、k_abc123
-  function nextId(prefix, existingList) {
-    // 知识条目使用短时间戳
+  function nextId(prefix, existingList) {    // 知识条目使用短时间戳
     if (prefix === 'k') {
       return 'k_' + Date.now().toString(36);
     }
@@ -282,6 +281,48 @@
     var nextNum = maxNum + 1;
     var padded = ('000' + nextNum).slice(-3);
     return prefix + padded;
+  }
+
+  /**
+   * 规范化集合成员：去重、剔除空值与已不存在的商家，保持原始顺序。
+   * 集合的商家数量始终以规范化后的实际成员为准。
+   * @param {Array} merchantIds 原始成员 ID 列表
+   * @param {Array} merchants 当前有效商家列表（可选，缺省时读取存储）
+   * @returns {Array} 清洗后的成员 ID 列表
+   */
+  function sanitizeMerchantIds(merchantIds, merchants) {
+    var validMap = {};
+    (merchants || store.getMerchants()).forEach(function (m) {
+      if (m && m.id != null) validMap[String(m.id)] = true;
+    });
+    var seen = {};
+    var result = [];
+    (Array.isArray(merchantIds) ? merchantIds : []).forEach(function (rawId) {
+      var id = rawId == null ? '' : String(rawId).trim();
+      if (!id || !validMap[id] || seen[id]) return;
+      seen[id] = true;
+      result.push(id);
+    });
+    return result;
+  }
+
+  /**
+   * 按当前有效商家重新计算全部集合的成员并持久化（幂等迁移）。
+   * @returns {Array} 规范化后的集合列表
+   */
+  function reconcileMerchantSets() {
+    var rawSets = load('merchantSets', defaultMerchantSets);
+    var merchants = store.getMerchants();
+    var changed = false;
+    var sets = (Array.isArray(rawSets) ? rawSets : []).map(function (s) {
+      var cleanIds = sanitizeMerchantIds(s.merchantIds, merchants);
+      if ((s.merchantIds || []).length !== cleanIds.length) changed = true;
+      return { id: s.id, name: s.name, merchantIds: cleanIds };
+    });
+    if (changed || !Array.isArray(rawSets)) {
+      save('merchantSets', sets);
+    }
+    return sets;
   }
 
   var store = {
@@ -375,7 +416,7 @@
     },
 
     getMerchantSets: function () {
-      return load('merchantSets', defaultMerchantSets);
+      return reconcileMerchantSets();
     },
     setMerchantSets: function (list) {
       save('merchantSets', list);
@@ -384,7 +425,7 @@
     createMerchantSet: function (name, merchantIds) {
       var sets = store.getMerchantSets().slice();
       var id = nextId('SET', sets);
-      sets.push({ id: id, name: name, merchantIds: merchantIds || [] });
+      sets.push({ id: id, name: name, merchantIds: sanitizeMerchantIds(merchantIds) });
       save('merchantSets', sets);
       var all = load('merchantSetKnowledge', {});
       all[id] = [];
@@ -394,10 +435,98 @@
     updateMerchantSet: function (id, name, merchantIds) {
       var sets = store.getMerchantSets().map(function (s) {
         if (s.id !== id) return s;
-        return { id: s.id, name: name != null ? name : s.name, merchantIds: merchantIds != null ? merchantIds : s.merchantIds };
+        return {
+          id: s.id,
+          name: name != null ? name : s.name,
+          merchantIds: merchantIds != null ? sanitizeMerchantIds(merchantIds) : s.merchantIds
+        };
       });
       save('merchantSets', sets);
       return sets;
+    },
+    /**
+     * 批量调整集合成员（一次提交，逐条给出结果）。
+     * @param {string} setId 集合 ID
+     * @param {Object} payload { removeIds: [], addIds: [] }
+     * @returns {Object} { success, set, results: [{ merchantId, action, status, message }], summary }
+     *   status: 'removed' | 'added' | 'skipped' | 'failed'
+     */
+    batchAdjustMerchantSetMembers: function (setId, payload) {
+      var results = [];
+      var sets = store.getMerchantSets();
+      var target = sets.find(function (s) { return s.id === setId; });
+      if (!target) {
+        return { success: false, set: null, results: results, summary: { removed: 0, added: 0, skipped: 0, failed: 0 }, message: '集合不存在或已被删除' };
+      }
+
+      var merchantMap = {};
+      store.getMerchants().forEach(function (m) { merchantMap[m.id] = m; });
+
+      // 以实际成员为基线，逐条处理；先移除后补进，同批重复选择只计一次
+      var memberIds = target.merchantIds.slice();
+      var processed = {};
+      var removeIds = Array.isArray(payload && payload.removeIds) ? payload.removeIds : [];
+      var addIds = Array.isArray(payload && payload.addIds) ? payload.addIds : [];
+
+      removeIds.forEach(function (rawId) {
+        var id = rawId == null ? '' : String(rawId).trim();
+        var key = 'remove:' + id;
+        if (!id) {
+          results.push({ merchantId: id, action: 'remove', status: 'failed', message: '商家 ID 为空，移除失败' });
+          return;
+        }
+        if (processed[key]) {
+          results.push({ merchantId: id, action: 'remove', status: 'skipped', message: '同批重复勾选，已跳过' });
+          return;
+        }
+        processed[key] = true;
+        if (memberIds.indexOf(id) === -1) {
+          results.push({ merchantId: id, action: 'remove', status: 'skipped', message: '该商家不在集合中，无需移除' });
+          return;
+        }
+        memberIds = memberIds.filter(function (mid) { return mid !== id; });
+        results.push({ merchantId: id, action: 'remove', status: 'removed', message: '已移出集合' });
+      });
+
+      addIds.forEach(function (rawId) {
+        var id = rawId == null ? '' : String(rawId).trim();
+        var key = 'add:' + id;
+        if (!id) {
+          results.push({ merchantId: id, action: 'add', status: 'failed', message: '商家 ID 为空，加入失败' });
+          return;
+        }
+        if (processed[key]) {
+          results.push({ merchantId: id, action: 'add', status: 'skipped', message: '同批重复勾选，已跳过' });
+          return;
+        }
+        processed[key] = true;
+        if (!merchantMap[id]) {
+          results.push({ merchantId: id, action: 'add', status: 'failed', message: '商家不存在或已被删除，加入失败' });
+          return;
+        }
+        if (memberIds.indexOf(id) !== -1) {
+          results.push({ merchantId: id, action: 'add', status: 'skipped', message: '该商家已在集合中，无需重复加入' });
+          return;
+        }
+        memberIds.push(id);
+        results.push({ merchantId: id, action: 'add', status: 'added', message: '已加入集合' });
+      });
+
+      var updatedSets = sets.map(function (s) {
+        return s.id === setId ? { id: s.id, name: s.name, merchantIds: memberIds } : s;
+      });
+      save('merchantSets', updatedSets);
+      var updatedSet = updatedSets.find(function (s) { return s.id === setId; });
+
+      var summary = { removed: 0, added: 0, skipped: 0, failed: 0 };
+      results.forEach(function (r) {
+        if (r.status === 'removed') summary.removed++;
+        else if (r.status === 'added') summary.added++;
+        else if (r.status === 'skipped') summary.skipped++;
+        else if (r.status === 'failed') summary.failed++;
+      });
+
+      return { success: true, set: updatedSet, results: results, summary: summary };
     },
     deleteMerchantSet: function (id) {
       var sets = store.getMerchantSets().filter(function (s) { return s.id !== id; });
